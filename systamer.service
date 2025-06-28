@@ -1,0 +1,28 @@
+#systemd unit service - put it under /etc/systemd/system/
+[Unit]
+Description=SysTamer interactive Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+#SysTamer requires root access for most of the tasks. If you want to limit
+#it, you can use a non-privileged user, maybe with some sudo configuration.
+#User=systamer
+#Group=systamer
+WorkingDirectory=/opt/SysTamer
+
+# If you use a virtual-env, point ExecStart to /opt/systamer/venv/bin/python
+ExecStart=/usr/bin/python3 /opt/SysTamer/systamer.py
+
+Restart=on-failure
+RestartSec=10
+
+# Hardening (comment any out that block a feature you need)
+#ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
