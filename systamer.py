@@ -3,6 +3,7 @@
 import psutil
 import hashlib
 import asyncio
+import subprocess
 import httpcore
 import nest_asyncio
 import telegram.error
@@ -23,6 +24,7 @@ from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTyp
 
 nest_asyncio.apply()
 
+MAX_TELEGRAM_MSG_LEN = 4000  # a bit less than 4096 to be safe
 
 #   --------------------------------------------------------------------------------------------------------------------
 #   ....................................................................................................................
@@ -52,14 +54,20 @@ def require_authentication(func, *_args, **_kwargs):
 
 def log_action(func, *_args, **_kwargs):
     async def _impl(self, update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        message_text = update.message.text  # This will contain the full command, e.g., "/start arg1 arg2"
+        # Try to get the message text from either a message or a callback query
+        message_text = None
+        if update.message and update.message.text:
+            message_text = update.message.text
+        elif update.callback_query and update.callback_query.data:
+            message_text = update.callback_query.data
+        else:
+            message_text = ""
         parts = message_text.split()
         command_name = parts[0] if parts else ""
         command_args = parts[1:] if len(parts) > 1 else []
         print_cmd(f"user {SysTamer.get_update_username(update)}\t|\tcmd {command_name}" +
                   (f"\t|\targs {','.join(command_args)}" if command_args else ''))
         return await func(self, update, context, *args, **kwargs)
-
     return _impl
 
 
@@ -126,6 +134,18 @@ class SysTamer:
         return update.effective_user.username if update.effective_user.username else update.effective_user.id
 
     @staticmethod
+    async def safe_reply(update: Update, text: str, **kwargs):
+        if update.message:
+            await update.message.reply_text(text, **kwargs)
+        elif update.callback_query:
+            # Prefer editing the message for callback queries
+            try:
+                await update.callback_query.edit_message_text(text, **kwargs)
+            except telegram.error.BadRequest:
+                # If editing fails (e.g., message already edited), send a new message
+                await update.callback_query.message.reply_text(text, **kwargs)
+
+    @staticmethod
     def should_authenticate():
         return len(SysTamer._PASSWORD) > 0
 
@@ -144,6 +164,37 @@ class SysTamer:
             print_error(f"{SysTamer._BROWSE_IGNORE_PATH} was not loaded")
         print_info(f"Loaded `/browse` ignore paths from -> {BOLD}{SysTamer._BROWSE_IGNORE_PATH}{RESET}")
         return ignored_paths
+
+    @staticmethod
+    def split_message(text, max_length=MAX_TELEGRAM_MSG_LEN):
+        """Split text into chunks suitable for Telegram messages."""
+        lines = text.splitlines(keepends=True)
+        chunks = []
+        current = ""
+        for line in lines:
+            if len(current) + len(line) > max_length:
+                chunks.append(current)
+                current = ""
+            current += line
+        if current:
+            chunks.append(current)
+        return chunks
+
+    async def send_long_message(self, update_or_query, text, parse_mode=None):
+        """Send long text as multiple messages/chunks."""
+        chunks = self.split_message(text)
+        for i, chunk in enumerate(chunks):
+            msg = f"```\n{chunk}\n```" if parse_mode and "Markdown" in parse_mode else chunk
+            # Handle Update object (from command)
+            if hasattr(update_or_query, "message") and update_or_query.message:
+                await update_or_query.message.reply_text(msg, parse_mode=parse_mode)
+            # Handle CallbackQuery object (from inline button)
+            elif hasattr(update_or_query, "edit_message_text"):
+                if i == 0:
+                    await update_or_query.edit_message_text(msg, parse_mode=parse_mode)
+                else:
+                    if hasattr(update_or_query, "message") and update_or_query.message:
+                        await update_or_query.message.reply_text(msg, parse_mode=parse_mode)
 
     @log_action
     async def login(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -474,6 +525,96 @@ class SysTamer:
             else:
                 await query.edit_message_text(text="Invalid action selected.")
 
+    @log_action
+    @require_authentication
+    async def systemctl_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not context.args:
+            await self.safe_reply(update, "Usage: /systemctl <command> [service/filter]\n"
+                                    "Commands: list, enable, disable, status, start, stop, restart")
+            return
+
+        cmd = context.args[0].lower()
+        arg = context.args[1] if len(context.args) > 1 else ""
+
+        if cmd == "list":
+            filter_str = arg
+            try:
+                result = subprocess.run(
+                    ["systemctl", "list-units", "--type=service", "--no-pager", "--no-legend"],
+                    capture_output=True, text=True, check=True
+                )
+                lines = result.stdout.strip().split('\n')
+                filtered = [line for line in lines if filter_str.lower() in line.lower()] if filter_str else lines
+                if not filtered:
+                    await self.safe_reply(update, "No services found.")
+                    return
+                # Limit output to avoid flooding
+                max_lines = 30
+                output = "\n".join(filtered[:max_lines])
+                if len(filtered) > max_lines:
+                    output += f"\n...and {len(filtered)-max_lines} more."
+                await self.safe_reply(update, f"```\n{output}\n```", parse_mode="MarkdownV2")
+            except Exception as e:
+                await self.safe_reply(update, f"Error: {e}")
+
+        elif cmd in {"start", "stop", "restart"}:
+            if not arg:
+                await self.safe_reply(update, f"Usage: /systemctl {cmd} <service>")
+                return
+            # Ask for confirmation
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Yes", callback_data=f"systemctl_confirm {cmd} {arg}"),
+                    InlineKeyboardButton("❌ No", callback_data="systemctl_cancel")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await self.safe_reply(
+                update,
+                f"Are you sure you want to *{cmd}* service `{arg}`?",
+                reply_markup=reply_markup,
+                parse_mode="MarkdownV2"
+            )
+
+        elif cmd in {"enable", "disable", "status"}:
+            if not arg:
+                await self.safe_reply(update, f"Usage: /systemctl {cmd} <service>")
+                return
+            try:
+                result = subprocess.run(
+                    ["systemctl", cmd, arg],
+                    capture_output=True, text=True
+                )
+                output = result.stdout.strip() or result.stderr.strip()
+                if not output:
+                    output = f"systemctl {cmd} {arg} completed (no output)."
+                await self.send_long_message(update, output, parse_mode="MarkdownV2")
+            except Exception as e:
+                await self.safe_reply(update, f"Error: {e}")
+
+        else:
+            await self.safe_reply(update, "Unknown systemctl command. Allowed: list, enable, disable, status, start, stop, restart")
+
+
+    async def handle_systemctl_confirmation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        data = query.data.split(' ', 2)
+        if data[0] == "systemctl_confirm":
+            cmd, arg = data[1], data[2]
+            try:
+                result = subprocess.run(
+                    ["systemctl", cmd, arg],
+                    capture_output=True, text=True
+                )
+                output = result.stdout.strip() or result.stderr.strip()
+                if not output:
+                    output = f"systemctl {cmd} {arg} completed (no output)."
+                await self.send_long_message(query, output, parse_mode="MarkdownV2")
+            except Exception as e:
+                await query.edit_message_text(f"Error: {e}")
+        elif data[0] == "systemctl_cancel":
+            await query.edit_message_text("Operation cancelled.")
+
     def _register_command_handlers(self, application: telegram.ext.Application) -> None:
         application.add_handler(CommandHandler("start", self.start))
         application.add_handler(CommandHandler("help", self.start))
@@ -486,6 +627,7 @@ class SysTamer:
         application.add_handler(CommandHandler("list_uploads", self.list_uploads))
         application.add_handler(CommandHandler("login", self.login))
         application.add_handler(CommandHandler("logout", self.logout))
+        application.add_handler(CommandHandler("systemctl", self.systemctl_command))
 
     def _register_message_handlers(self, application: telegram.ext.Application) -> None:
         application.add_handler(MessageHandler(filters.Document.ALL, self.handle_file_upload))
@@ -496,6 +638,7 @@ class SysTamer:
         application.add_handler(MessageHandler(filters.VIDEO_NOTE, self.handle_file_upload))
 
     def _register_cb_query_handlers(self, application: telegram.ext.Application) -> None:
+        application.add_handler(CallbackQueryHandler(self.handle_systemctl_confirmation, pattern="^systemctl_"))
         application.add_handler(CallbackQueryHandler(self.handle_navigation))
 
     def _build_app(self) -> telegram.ext.Application:

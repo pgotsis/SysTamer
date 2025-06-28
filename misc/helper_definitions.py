@@ -13,6 +13,7 @@ COMMANDS_DICT = {
     "system": "Get system resource usage",
     "processes": "Active processes <F=FILTER>",
     "kill": "Kill a process by its PID",
+    "systemctl": "Handle systemd services",
     "screenshot": "Take & send a screenshot",
     "logout": "De-authenticate the session",
     "help": "Refers to /start"
@@ -21,13 +22,14 @@ COMMANDS_DICT = {
 PARAMS_DICT = {
     "login": ["PASS"],
     "processes": ["F"],
-    "kill": ["PID"]
+    "kill": ["PID"],
+    "systemctl": ["ACT", "SRVC"]
 }
 
 
 def generate_cmd_dict_msg(description, commands: dict) -> str:
-    header = f"{description}:\n| Command        | Description                    |\n"
-    separator = "|----------------|--------------------------------|\n"
+    header = f"{description}:\n| Command                  | Description                    |\n"
+    separator = "|--------------------------|--------------------------------|\n"
 
     # Create the table with the header and separator
     table = header + separator
@@ -38,7 +40,7 @@ def generate_cmd_dict_msg(description, commands: dict) -> str:
         if command in PARAMS_DICT:
             command += "\t" + ','.join([f"<{arg}>" for arg in PARAMS_DICT[command]])
         command = "/" + command
-        table += f"| {command:<14} | {description:<30} |\n"
+        table += f"| {command:<24} | {description:<30} |\n"
 
     return f"```{table}```"
 
