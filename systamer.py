@@ -598,6 +598,7 @@ class SysTamer:
 
     async def handle_systemctl_confirmation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
+        await query.answer()
         data = query.data.split(' ', 2)
         if data[0] == "systemctl_confirm":
             cmd, arg = data[1], data[2]
