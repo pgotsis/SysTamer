@@ -226,6 +226,7 @@ class SysTamer:
                         await update_or_query.message.reply_text(msg, parse_mode=parse_mode)
 
     @log_action
+    @require_allowed_user
     async def login(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not self.should_authenticate():
             await update.message.reply_text("Authentication is not required.")
