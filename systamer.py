@@ -83,9 +83,33 @@ def check_for_permission(func, *_args, **_kwargs):
     return _impl
 
 
+def require_allowed_user(func):
+    async def _impl(self, update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        user_id = str(update.effective_user.id) if update.effective_user else None
+        username = update.effective_user.username if update.effective_user and update.effective_user.username else "N/A"
+        # Try to get the command attempted
+        command = ""
+        if update.message and update.message.text:
+            command = update.message.text
+        elif update.callback_query and update.callback_query.data:
+            command = update.callback_query.data
+        if SysTamer._ALLOWED_USERS and user_id not in SysTamer._ALLOWED_USERS:
+            print_cmd(
+                f"Unauthorized access attempt by user {user_id} (username: {username}) | command: {command}"
+            )
+            if update.message:
+                await update.message.reply_text("You are not authorized to use this bot.")
+            elif update.callback_query:
+                await update.callback_query.answer("You are not authorized to use this bot.", show_alert=True)
+            return
+        return await func(self, update, context, *args, **kwargs)
+    return _impl
+
+
 class SysTamer:
     _BROWSE_IGNORE_PATH = ".browseignore"
     _PASSWORD = str()
+    _ALLOWED_USERS = set()
 
     def __init__(self, json_conf: dict):
         self._bot_token = json_conf.get("bot_token", None)
@@ -99,6 +123,11 @@ class SysTamer:
             print_info(f"Password set to -> {BOLD}{SysTamer._PASSWORD}{RESET}")
         else:
             print_info("No password was set, running an unauthenticated session...")
+        SysTamer._ALLOWED_USERS = set(str(uid) for uid in json_conf.get("allowed_users", []))
+        if SysTamer._ALLOWED_USERS:
+            print_info(f"Allowed users set to -> {BOLD}{', '.join(map(str, SysTamer._ALLOWED_USERS))}{RESET}")
+        else:
+            print_info("No allowed users were set, running an unauthenticated session...")
 
         self._timeout_duration = json_conf.get("timeout_duration", 10)
         self._uploads_dir = os.path.join(os.getcwd(), "uploads")
@@ -236,6 +265,7 @@ class SysTamer:
 
     @log_action
     @require_authentication
+    @require_allowed_user
     async def send_screenshot(self, update: Update, _context: ContextTypes.DEFAULT_TYPE):
         with mss.mss() as sct:
             screenshot = sct.grab(sct.monitors[0])  # Capture the full screen
@@ -262,6 +292,7 @@ class SysTamer:
             await update.message.reply_text(f"Network error occurred: {exc}. Please try again later.")
 
     @require_authentication
+    @require_allowed_user
     async def handle_file_upload(self, update: Update, _context: ContextTypes.DEFAULT_TYPE):
         if not os.path.exists(self._uploads_dir):
             os.makedirs(self._uploads_dir)
@@ -320,6 +351,7 @@ class SysTamer:
 
     @log_action
     @require_authentication
+    @require_allowed_user
     async def list_uploads(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             if not os.path.exists(self._uploads_dir):
@@ -352,6 +384,7 @@ class SysTamer:
 
     @log_action
     @require_authentication
+    @require_allowed_user
     async def system_resource_monitoring(self, update: Update, _context: ContextTypes.DEFAULT_TYPE):
         cpu_usage = psutil.cpu_percent(interval=1)
         memory_info = psutil.virtual_memory()
@@ -362,6 +395,7 @@ class SysTamer:
 
     @log_action
     @require_authentication
+    @require_allowed_user
     async def list_processes(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         processes = []
         args_lower = [i.lower() for i in context.args]
@@ -386,6 +420,7 @@ class SysTamer:
 
     @log_action
     @require_authentication
+    @require_allowed_user
     async def kill_process(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         process_ids = [int(i) for i in context.args]
         if not process_ids:
@@ -406,6 +441,7 @@ class SysTamer:
 
     @log_action
     @require_authentication
+    @require_allowed_user
     async def upload_info(self, update: Update, _context: ContextTypes.DEFAULT_TYPE):
         upload_message = (
             f"Simply send a file, and it will be saved to -> {self._uploads_dir}"
@@ -443,6 +479,7 @@ class SysTamer:
     @log_action
     @check_for_permission
     @require_authentication
+    @require_allowed_user
     async def browse(self, update: Update, _context: ContextTypes.DEFAULT_TYPE):
         path = str(Path.home())
         all_buttons = self.list_files_and_directories(path)
@@ -453,6 +490,7 @@ class SysTamer:
 
     @check_for_permission
     @require_authentication
+    @require_allowed_user
     async def handle_navigation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         data = query.data.split(' ', 1)
@@ -527,6 +565,7 @@ class SysTamer:
 
     @log_action
     @require_authentication
+    @require_allowed_user
     async def systemctl_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not context.args:
             await self.safe_reply(update, "Usage: /systemctl <command> [service/filter]\n"
@@ -595,7 +634,7 @@ class SysTamer:
         else:
             await self.safe_reply(update, "Unknown systemctl command. Allowed: list, enable, disable, status, start, stop, restart")
 
-
+    @require_allowed_user
     async def handle_systemctl_confirmation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         data = query.data.split(' ', 2)
